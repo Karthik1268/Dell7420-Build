@@ -1,0 +1,231 @@
+# Dell Latitude 7420 2-in-1 - every kext built from source, trimmed to this laptop's hardware.
+# Run: Actions tab -> "Build Dell 7420 kexts" -> Run workflow. Result: artifact "Dell7420-Kexts".
+name: Build Dell 7420 kexts
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Pinned sources (change a ref here to rebuild with a newer version)
+  LILU_REF: "1.7.2"
+  SDK_REF: "3f750085caa17ec3a7880f11c11bf4f48cd6a164"
+  WEX_SDK_REF: "05094e5e88cec7caedbfb35e8449ed0db94bf95b"
+  WEX_REPO: "Karthik1268/WhateverXe"        # 0.8.2 + Dell eDP 1.4 rate-select fix
+  WEX_REF: "main"
+  VSMC_REF: "1.3.8"
+  ALC_REF: "1.9.8"
+  PS2_REF: "7eab4a344d901d1e4aa6ece4189ecde5a7356287"   # 2.3.7
+  I2C_REF: "0271bbddda610fdbb553a37a7edf061054d1ff20"   # Tiger Lake + corner-click fix
+  ITLWM_REPO: "laobamac/itlwm"
+  ITLWM_REF: "7204c69"                                   # 2.4.0-alpha Sequoia
+  IBT_REF: "v2.4.0"
+  BRCM_REF: "2.7.2"
+  CPUF_REF: "1.3.0"
+  NVME_REF: "1.1.3"
+  RE_REF: "1.1.6"
+  BK_REF: "1.0.3"
+  ECE_REF: "1.0.6"
+  UTB_REF: "1.2.0"
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    steps:
+      - name: Prepare
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          mkdir -p src out/Kexts logs
+          echo "W=$PWD" >> "$GITHUB_ENV"
+
+      - name: Fetch sources
+        run: |
+          set -euo pipefail
+          cd src
+          get() { git clone -q --filter=blob:none "https://github.com/$1" "$2" && git -C "$2" checkout -q "$3" && echo "$2 $1 $(git -C "$2" rev-parse --short HEAD)" >> ../logs/sources.txt; }
+          get acidanthera/MacKernelSDK MacKernelSDK "$SDK_REF"
+          get acidanthera/MacKernelSDK MacKernelSDK-WEX "$WEX_SDK_REF"
+          get acidanthera/Lilu Lilu "$LILU_REF"
+          get "$WEX_REPO" WhateverXe "$WEX_REF"
+          get acidanthera/VirtualSMC VirtualSMC "$VSMC_REF"
+          get acidanthera/AppleALC AppleALC "$ALC_REF"
+          get acidanthera/VoodooPS2 VoodooPS2 "$PS2_REF"
+          get VoodooI2C/VoodooI2C VoodooI2C "$I2C_REF"
+          git -C VoodooI2C submodule update -q --init --recursive
+          get "$ITLWM_REPO" itlwm "$ITLWM_REF"
+          get OpenIntelWireless/IntelBluetoothFirmware IntelBluetoothFirmware "$IBT_REF"
+          get acidanthera/BrcmPatchRAM BrcmPatchRAM "$BRCM_REF"
+          get acidanthera/CPUFriend CPUFriend "$CPUF_REF"
+          get acidanthera/NVMeFix NVMeFix "$NVME_REF"
+          get acidanthera/RestrictEvents RestrictEvents "$RE_REF"
+          get acidanthera/BrightnessKeys BrightnessKeys "$BK_REF"
+          get 1Revenger1/ECEnabler ECEnabler "$ECE_REF"
+          get USBToolBox/kext USBToolBox "$UTB_REF"
+          cat ../logs/sources.txt
+
+      - name: Trim sources to Dell 7420 hardware
+        run: |
+          set -euo pipefail
+          cd src
+          # Wi-Fi: Intel AX201 (8086:A0F0) firmware only (Qu / QuZ + Hr radio)
+          find itlwm/itlwm/firmware -type f ! -name 'iwlwifi-Qu-b0-hr-b0-*' ! -name 'iwlwifi-Qu-c0-hr-b0-*' ! -name 'iwlwifi-QuZ-a0-hr-b0-*' -delete
+          rm -f itlwm/include/FwBinary.cpp
+          ls -l itlwm/itlwm/firmware
+          # Bluetooth: Intel AX201 (8087:0026, ibt-19) firmware only
+          find IntelBluetoothFirmware/IntelBluetoothFirmware/fw -type f ! -name 'ibt-19-*' -delete
+          ls IntelBluetoothFirmware/IntelBluetoothFirmware/fw
+          # Audio: Realtek ALC289, layout 69 only
+          python3 - <<'PY'
+          import os, shutil, plistlib
+          R = 'AppleALC/Resources'
+          keep = {'ALC289', 'PinConfigs.kext', 'Controllers.plist', 'Kexts.plist', 'Vendors.plist'}
+          for n in os.listdir(R):
+              if n not in keep:
+                  p = os.path.join(R, n); shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
+          d = os.path.join(R, 'ALC289'); ip = os.path.join(d, 'Info.plist')
+          info = plistlib.load(open(ip, 'rb'))
+          for kind in ('Layouts', 'Platforms'):
+              info['Files'][kind] = [e for e in info['Files'][kind] if e['Id'] == 69]
+          plistlib.dump(info, open(ip, 'wb'))
+          for f in os.listdir(d):
+              if f.endswith('.xml') and f not in ('layout69.xml', 'Platforms69.xml'): os.remove(os.path.join(d, f))
+          pp = os.path.join(R, 'PinConfigs.kext/Contents/Info.plist')
+          pc = plistlib.load(open(pp, 'rb'))
+          per = pc['IOKitPersonalities']['as.vit9696.AppleALC']
+          per['HDAConfigDefault'] = [e for e in per['HDAConfigDefault'] if e.get('CodecID') == 0x10EC0289 and e.get('LayoutID') == 69]
+          assert len(per['HDAConfigDefault']) == 1, 'ALC289 layout 69 pin config not found'
+          plistlib.dump(pc, open(pp, 'wb'))
+          print('AppleALC resources:', sorted(os.listdir(R)), sorted(os.listdir(d)))
+          PY
+
+      - name: Build Lilu (from source; DEBUG copy is the SDK for the plugins)
+        run: |
+          set -euo pipefail
+          cd src/Lilu && ln -s ../MacKernelSDK MacKernelSDK
+          xcodebuild -quiet -jobs 3 -arch x86_64 -configuration Debug   > "$W/logs/Lilu-debug.log" 2>&1 || { tail -60 "$W/logs/Lilu-debug.log"; exit 1; }
+          xcodebuild -quiet -jobs 3 -arch x86_64 -configuration Release > "$W/logs/Lilu.log" 2>&1 || { tail -60 "$W/logs/Lilu.log"; exit 1; }
+          test -f build/Debug/Lilu.kext/Contents/Resources/Headers/kern_api.hpp
+          cp -R build/Release/Lilu.kext "$W/out/Kexts/"
+
+      - name: Build Lilu plugins
+        run: |
+          set -euo pipefail
+          plugin() {  # dir, xcodebuild args...
+            local d=$1; shift
+            ( cd "src/$d"; ln -sfn ../MacKernelSDK MacKernelSDK; rm -rf Lilu.kext; cp -R ../Lilu/build/Debug/Lilu.kext .
+              xcodebuild -jobs 3 -arch x86_64 -configuration Release "$@" > "$W/logs/$d.log" 2>&1 || { tail -80 "$W/logs/$d.log"; exit 1; } )
+          }
+          plugin VirtualSMC -target VirtualSMC -target SMCBatteryManager -target SMCProcessor -target SMCDellSensors
+          plugin AppleALC -target AppleALC
+          plugin BrcmPatchRAM -target BlueToolFixup
+          plugin CPUFriend
+          plugin NVMeFix
+          plugin RestrictEvents
+          plugin BrightnessKeys
+          plugin ECEnabler
+          for k in VirtualSMC SMCBatteryManager SMCProcessor SMCDellSensors; do cp -R src/VirtualSMC/build/Release/$k.kext out/Kexts/; done
+          cp -R src/AppleALC/build/Release/AppleALC.kext out/Kexts/
+          cp -R src/BrcmPatchRAM/build/Release/BlueToolFixup.kext out/Kexts/
+          for d in CPUFriend NVMeFix RestrictEvents BrightnessKeys ECEnabler; do cp -R src/$d/build/Release/$d.kext out/Kexts/; done
+
+      - name: Build WhateverXe (Dell fork)
+        run: |
+          set -euo pipefail
+          cd src/WhateverXe
+          rm -rf MacKernelSDK Lilu.kext; ln -s ../MacKernelSDK-WEX MacKernelSDK; cp -R ../Lilu/build/Debug/Lilu.kext .
+          python3 tools/build.py --release --output build/RELEASE > "$W/logs/WhateverXe.log" 2>&1 || { tail -80 "$W/logs/WhateverXe.log"; exit 1; }
+          cp -R build/RELEASE/WhateverXe.kext "$W/out/Kexts/"
+
+      - name: Build Intel Bluetooth (AX201 firmware only)
+        run: |
+          set -euo pipefail
+          cd src/IntelBluetoothFirmware
+          ln -sfn ../MacKernelSDK MacKernelSDK; cp -R ../Lilu/build/Debug/Lilu.kext .
+          for t in IntelBluetoothFirmware IntelBTPatcher; do
+            xcodebuild -jobs 3 -arch x86_64 -configuration Release -target $t > "$W/logs/$t.log" 2>&1 || { tail -80 "$W/logs/$t.log"; exit 1; }
+            cp -R build/Release/$t.kext "$W/out/Kexts/"
+          done
+
+      - name: Build AirportItlwm Sequoia (AX201 only)
+        run: |
+          set -euo pipefail
+          cd src/itlwm
+          ln -sfn ../MacKernelSDK MacKernelSDK
+          python3 - <<'PY'
+          import glob, re
+          for p in glob.glob('AirportItlwm/**/*.plist', recursive=True):
+              s = open(p).read()
+              s2 = re.sub(r'<string>0x27238086 0x43F08086 0xA0F08086[^<]*</string>', '<string>0xA0F08086</string>', s)
+              if s2 != s: open(p, 'w').write(s2); print('PCI match -> 0xA0F08086:', p)
+          PY
+          xcodebuild -project itlwm.xcodeproj -scheme AirportItlwm-Sequoia -configuration Release -jobs 3 ARCHS=x86_64 \
+            SYMROOT="$PWD/build/products" OBJROOT="$PWD/build/obj" CODE_SIGNING_ALLOWED=NO GIT_COMMIT="_$(git rev-parse --short HEAD)" \
+            build > "$W/logs/AirportItlwm.log" 2>&1 || { tail -100 "$W/logs/AirportItlwm.log"; exit 1; }
+          cp -R build/products/Release/Sequoia/AirportItlwm.kext "$W/out/Kexts/"
+
+      - name: Build VoodooPS2 (keyboard only)
+        run: |
+          set -euo pipefail
+          cd src/VoodooPS2
+          ln -sfn ../MacKernelSDK MacKernelSDK
+          src=$(/usr/bin/curl -Lfs https://raw.githubusercontent.com/acidanthera/VoodooInput/master/VoodooInput/Scripts/bootstrap.sh) && eval "$src"
+          xcodebuild -jobs 3 -arch x86_64 -configuration Release > "$W/logs/VoodooPS2.log" 2>&1 || { tail -80 "$W/logs/VoodooPS2.log"; exit 1; }
+          K=build/Release/VoodooPS2Controller.kext
+          rm -rf $K/Contents/PlugIns/VoodooPS2Mouse.kext $K/Contents/PlugIns/VoodooPS2Trackpad.kext
+          ls $K/Contents/PlugIns
+          cp -R $K "$W/out/Kexts/"
+
+      - name: Build VoodooI2C (Tiger Lake, HID only)
+        run: |
+          set -euo pipefail
+          cd src/VoodooI2C
+          ln -sfn ../MacKernelSDK MacKernelSDK
+          src=$(/usr/bin/curl -Lfs https://raw.githubusercontent.com/acidanthera/VoodooInput/master/VoodooInput/Scripts/bootstrap.sh) && eval "$src" && mv VoodooInput Dependencies
+          xcodebuild -workspace VoodooI2C.xcworkspace -scheme VoodooI2C -derivedDataPath build -jobs 3 -configuration Release ARCHS=x86_64 \
+            > "$W/logs/VoodooI2C.log" 2>&1 || { tail -100 "$W/logs/VoodooI2C.log"; exit 1; }
+          P=build/Build/Products/Release
+          ls $P
+          cp -R $P/VoodooI2C.kext $P/VoodooI2CHID.kext "$W/out/Kexts/"
+
+      - name: Build USBToolBox
+        run: |
+          set -euo pipefail
+          cd src/USBToolBox
+          ln -sfn ../MacKernelSDK MacKernelSDK
+          xcodebuild -jobs 3 -arch x86_64 -configuration Release > "$W/logs/USBToolBox.log" 2>&1 || { tail -80 "$W/logs/USBToolBox.log"; exit 1; }
+          cp -R build/Release/USBToolBox.kext "$W/out/Kexts/"
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          cd out
+          find Kexts -name '*.dSYM' -prune -exec rm -rf {} +
+          {
+            echo "Dell Latitude 7420 kexts - built $(date -u '+%Y-%m-%d %H:%M UTC') on $(sw_vers -productVersion), $(xcodebuild -version | head -1)"
+            echo; echo "== sources"; cat ../logs/sources.txt
+            echo; echo "== kexts"
+            for k in Kexts/*.kext; do
+              v=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$k/Contents/Info.plist" 2>/dev/null || echo "?")
+              echo "$(basename "$k") $v $(du -sh "$k" | cut -f1)"
+            done
+          } > MANIFEST.txt
+          cat MANIFEST.txt
+          ditto -c -k --keepParent Kexts Dell7420-Kexts.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Dell7420-Kexts
+          path: |
+            out/Dell7420-Kexts.zip
+            out/MANIFEST.txt
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-logs
+          path: logs
